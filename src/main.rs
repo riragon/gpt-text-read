@@ -2,7 +2,11 @@ use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use fltk::{app, prelude::*, window::Window, button::Button, input::MultilineInput, group::Flex};
+use fltk::{
+    app, prelude::*,
+    window::Window, button::Button, input::MultilineInput, group::Flex,
+    text::{TextEditor, TextBuffer, WrapMode}
+};
 use std::rc::Rc;
 use std::cell::RefCell;
 use walkdir::WalkDir;
@@ -24,35 +28,50 @@ fn main() {
     let app = app::App::default();
     let mut win = Window::new(100, 100, 800, 600, "Text-Read with Settings");
 
-    let mut flex = Flex::default().size_of_parent().column();
-    flex.set_margin(10);
+    let mut main_flex = Flex::default().size_of_parent().column();
+    main_flex.set_margin(10);
 
-    // ファイルパターン入力欄
-    let pattern_input = MultilineInput::new(0,0,0,0,"");
-    let pattern_input = Rc::new(RefCell::new(pattern_input));
-    pattern_input.borrow_mut().set_readonly(false); 
+    let pattern_input = Rc::new(RefCell::new(MultilineInput::new(0,0,0,0,"")));
+    pattern_input.borrow_mut().set_readonly(false);
+    {
+        let pi = pattern_input.borrow();
+        main_flex.fixed(&*pi, 100);
+    }
 
-    // ボタンエリア
+    // ボタン行
     let mut btn_flex = Flex::default().row();
     btn_flex.set_spacing(10);
 
     let mut project_btn = Button::default().with_label("プロジェクト選択");
-    let mut add_file_btn = Button::default().with_label("ファイル追加"); // 復活したファイル追加ボタン
+    let mut add_file_btn = Button::default().with_label("ファイル追加");
     let mut save_btn = Button::default().with_label("設定保存");
     let mut load_btn = Button::default().with_label("読み込み実行");
     let mut copy_btn = Button::default().with_label("コピー");
 
     btn_flex.end();
+    main_flex.fixed(&btn_flex, 40);
 
-    let json_input_widget = MultilineInput::new(0,0,0,0,"");
-    let json_input = Rc::new(RefCell::new(json_input_widget));
-    json_input.borrow_mut().set_readonly(true);
+    // 中段Flex：選択ファイル内容表示とJSON表示を上下に並べる
+    let mid_flex = Flex::default().column();
 
-    flex.end();
+    let chosen_file_buffer = Rc::new(RefCell::new(TextBuffer::default()));
+    let mut chosen_file_editor = TextEditor::new(0,0,0,0,"");
+    chosen_file_editor.set_buffer(chosen_file_buffer.borrow().clone());
+    chosen_file_editor.wrap_mode(WrapMode::AtBounds, 0);
+
+    let json_buffer = Rc::new(RefCell::new(TextBuffer::default()));
+    let mut json_editor = TextEditor::new(0,0,0,0,"");
+    json_editor.set_buffer(json_buffer.borrow().clone());
+    json_editor.wrap_mode(WrapMode::AtBounds, 0);
+
+    mid_flex.end();
+    main_flex.add(&mid_flex);
+    main_flex.end();
+
+    win.resizable(&main_flex);
     win.end();
     win.show();
 
-    // 選択されたプロジェクトディレクトリパス
     let selected_project_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     {
@@ -63,10 +82,8 @@ fn main() {
                 let folder_path = folder.to_string_lossy().to_string();
                 *selected_project_dir.borrow_mut() = Some(folder_path.clone());
 
-                // settingsファイルチェック
                 let settings_path = Path::new(&folder_path).join("text-read-settings.txt");
                 if !settings_path.exists() {
-                    // 存在しないので初期作成
                     let default_content = r#"# 表示対象ファイルパターンを正規表現で記述してください
 # 例：^main\.rs$
 # 例：^Cargo\.toml$
@@ -76,7 +93,6 @@ fn main() {
                     }
                 }
 
-                // 読み込み
                 let patterns = load_target_patterns(&folder_path);
                 pattern_input.borrow_mut().set_value(&patterns.join("\n"));
             }
@@ -86,7 +102,6 @@ fn main() {
     {
         let pattern_input = Rc::clone(&pattern_input);
         add_file_btn.set_callback(move |_| {
-            // ファイル選択ダイアログ
             if let Some(files) = rfd::FileDialog::new().set_directory(".").pick_files() {
                 let mut input = pattern_input.borrow_mut();
                 let mut current_text = input.value();
@@ -94,11 +109,9 @@ fn main() {
                     current_text.push('\n');
                 }
 
-                // 選択したファイルをパターン化
                 for file in files {
                     if let Some(file_name) = file.file_name() {
                         let fname = file_name.to_string_lossy().to_string();
-                        // 正確に一致するパターンを追加
                         let escaped = regex::escape(&fname);
                         let pattern = format!("^{}$", escaped);
                         current_text.push_str(&pattern);
@@ -118,7 +131,6 @@ fn main() {
             if let Some(dir) = &*selected_project_dir.borrow() {
                 let settings_path = Path::new(dir).join("text-read-settings.txt");
                 let text = pattern_input.borrow().value();
-                // 保存
                 if let Ok(mut file) = File::create(&settings_path) {
                     let _ = file.write_all(text.as_bytes());
                 }
@@ -129,11 +141,12 @@ fn main() {
     {
         let selected_project_dir = Rc::clone(&selected_project_dir);
         let pattern_input = Rc::clone(&pattern_input);
-        let json_input = Rc::clone(&json_input);
+        let chosen_file_buffer = Rc::clone(&chosen_file_buffer);
+        let json_buffer = Rc::clone(&json_buffer);
+
         load_btn.set_callback(move |_| {
             if let Some(dir) = &*selected_project_dir.borrow() {
                 let base_dir = dir.as_str();
-                // pattern_inputからパターンを取得
                 let patterns_text = pattern_input.borrow().value();
                 let patterns: Vec<&str> = patterns_text.lines()
                     .map(|s| s.trim())
@@ -145,26 +158,37 @@ fn main() {
                     .collect();
 
                 let files = collect_target_files(base_dir, &regex_patterns);
-
                 let output = ProjectOutput { files };
+
+                // JSON形式で表示
                 let json_str = serde_json::to_string_pretty(&output).unwrap();
-                json_input.borrow_mut().set_value(&json_str);
+                json_buffer.borrow_mut().set_text(&json_str);
+
+                // すべてのファイルを表示（ファイル名＋内容）
+                let mut all_files_text = String::new();
+                for file_info in &output.files {
+                    all_files_text.push_str("File: ");
+                    all_files_text.push_str(&file_info.file_name);
+                    all_files_text.push_str("\n");
+                    all_files_text.push_str(&file_info.file_content);
+                    all_files_text.push_str("\n--------------------------------\n");
+                }
+                chosen_file_buffer.borrow_mut().set_text(&all_files_text);
             }
         });
     }
 
     {
-        let json_input = Rc::clone(&json_input);
+        let json_buffer = Rc::clone(&json_buffer);
         copy_btn.set_callback(move |_| {
-            let val = json_input.borrow().value();
-            app::copy(val.as_str());
+            let val = json_buffer.borrow().text();
+            app::copy(&val);
         });
     }
 
     app.run().unwrap();
 }
 
-/// text-read-settings.txtから表示対象パターンを取得
 fn load_target_patterns(base_dir: &str) -> Vec<String> {
     let settings_path = Path::new(base_dir).join("text-read-settings.txt");
     let mut patterns = Vec::new();
@@ -184,7 +208,6 @@ fn load_target_patterns(base_dir: &str) -> Vec<String> {
     patterns
 }
 
-/// パターンに合致するファイルを収集
 fn collect_target_files(base_dir: &str, targets: &[Regex]) -> Vec<FileInfo> {
     let mut results = Vec::new();
     let base_path = Path::new(base_dir);
@@ -211,7 +234,6 @@ fn collect_target_files(base_dir: &str, targets: &[Regex]) -> Vec<FileInfo> {
     results
 }
 
-/// ターゲットパターンにマッチするか
 fn is_in_target_patterns(filename: &str, patterns: &[Regex]) -> bool {
     patterns.iter().any(|re| re.is_match(filename))
 }
