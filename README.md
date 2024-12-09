@@ -2,12 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>gpt-text-read README</title>
-<style>
-  p {
-    padding-left: 2em;
-  }
-</style>
+
 </head>
 <body>
 
