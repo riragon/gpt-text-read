@@ -1,38 +1,40 @@
-use serde::Serialize;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+#![windows_subsystem = "windows"]
+
+mod models;
+mod settings;
+mod fileops;
+
 use fltk::{
     app, prelude::*,
-    window::Window, button::Button, input::MultilineInput, group::Flex,
+    window::Window,
+    button::{Button, CheckButton},
+    input::MultilineInput,
+    group::Flex,
     text::{TextEditor, TextBuffer, WrapMode},
     frame::Frame,
-    dialog::alert
+    dialog::alert,
+    enums::{Color, Font},
 };
-use std::rc::Rc;
 use std::cell::RefCell;
-use walkdir::WalkDir;
-use regex::Regex;
-// chronoを使って時刻を取得
+use std::path::Path;
+use std::rc::Rc;
 use chrono::Local;
+use std::fs::File;
+use std::io::Write;
 
-#[derive(Serialize, Debug)]
-struct FileInfo {
-    file_url: String,
-    file_name: String,
-    file_content: String,
-}
+// 使われている型だけインポート
+use crate::models::ProjectOutput;
+use crate::settings::{load_settings, write_settings};
+use crate::fileops::{collect_target_files, build_tree_view};
 
-#[derive(Serialize, Debug)]
-struct ProjectOutput {
-    files: Vec<FileInfo>,
-}
-
-// メッセージ(enum)でGUIイベントやバックグラウンド処理結果をやり取り
+// ------------------------------
+// GUIメッセージ
+// ------------------------------
 #[derive(Debug)]
 enum Message {
     SelectProject,
     AddFile,
+    ExcludeFolder,
     SaveSettings,
     StartLoad,
     LoadFinished(Result<ProjectOutput, String>),
@@ -41,17 +43,9 @@ enum Message {
     ExportTxt,
 }
 
-// 設定ファイルのロード結果をまとめる
-// patterns: 正規表現パターン一覧
-// output_path: テキスト出力先フォルダ (ユーザーがファイル保存ダイアログで指定したフォルダ)
-struct LoadedSettings {
-    patterns: Vec<String>,
-    output_path: Option<String>, // 例: "C:/Users/xxx/Desktop"
-}
-
 fn main() {
     let app = app::App::default();
-    let mut win = Window::new(100, 100, 950, 600, "Text-Read with Settings (Async)");
+    let mut win = Window::new(100, 100, 1000, 600, "Text-Read with Folder Exclude (Default .git, target)");
     
     // メッセージチャネル (sender, receiver)
     let (s, r) = app::channel::<Message>();
@@ -59,31 +53,112 @@ fn main() {
     let mut main_flex = Flex::default().size_of_parent().column();
     main_flex.set_margin(10);
 
-    // パターン入力 (正規表現パターン)
-    let pattern_input = Rc::new(RefCell::new(MultilineInput::new(0, 0, 0, 0, "")));
-    pattern_input.borrow_mut().set_readonly(false);
-    {
-        let pi = pattern_input.borrow();
-        main_flex.fixed(&*pi, 100);
-    }
+    // -------------------------
+    // 上段：パターン入力部（左右2カラム）
+    // -------------------------
+    let mut pattern_flex = Flex::default().row();
+    pattern_flex.set_spacing(10);
 
-    // ボタン行
+    // 左カラム: Include
+    let mut left_flex = Flex::default().column();
+    left_flex.set_spacing(5);
+
+    // ↓ mut を外しました
+    let inc_title = Frame::default().with_label("ファイル追加パターン（Include）");
+    left_flex.fixed(&inc_title, 20);
+
+    let include_input = Rc::new(RefCell::new(MultilineInput::new(0, 0, 0, 0, "")));
+    include_input.borrow_mut().set_readonly(false);
+    left_flex.add(&*include_input.borrow());
+
+    let mut add_file_btn = Button::default().with_label("ファイル追加");
+    // ボタンの文字設定
+    add_file_btn.set_label_size(14);
+    add_file_btn.set_label_color(Color::Black);
+    add_file_btn.set_label_font(Font::HelveticaBold);
+    left_flex.fixed(&add_file_btn, 30);
+
+    left_flex.end();
+
+    // 右カラム: Exclude
+    let mut right_flex = Flex::default().column();
+    right_flex.set_spacing(5);
+
+    // ↓ mut を外しました
+    let exc_title = Frame::default().with_label("ファイル除外パターン（Exclude）");
+    right_flex.fixed(&exc_title, 20);
+
+    let exclude_input = Rc::new(RefCell::new(MultilineInput::new(0, 0, 0, 0, "")));
+    exclude_input.borrow_mut().set_readonly(false);
+    right_flex.add(&*exclude_input.borrow());
+
+    let mut exclude_folder_btn = Button::default().with_label("フォルダ除外");
+    // ボタンの文字設定
+    exclude_folder_btn.set_label_size(14);
+    exclude_folder_btn.set_label_color(Color::Black);
+    exclude_folder_btn.set_label_font(Font::HelveticaBold);
+    right_flex.fixed(&exclude_folder_btn, 30);
+
+    right_flex.end();
+
+    pattern_flex.add(&left_flex);
+    pattern_flex.add(&right_flex);
+    pattern_flex.end();
+
+    main_flex.fixed(&pattern_flex, 180);
+
+    // -------------------------
+    // 中段：ボタン行
+    // -------------------------
     let mut btn_flex = Flex::default().row();
     btn_flex.set_spacing(10);
 
     let mut project_btn = Button::default().with_label("プロジェクト選択");
-    let mut add_file_btn = Button::default().with_label("ファイル追加");
+    project_btn.set_label_size(14);
+    project_btn.set_label_color(Color::Black);
+    project_btn.set_label_font(Font::HelveticaBold);
+
     let mut save_btn = Button::default().with_label("設定保存");
+    save_btn.set_label_size(14);
+    save_btn.set_label_color(Color::Black);
+    save_btn.set_label_font(Font::HelveticaBold);
+
     let mut load_btn = Button::default().with_label("読み込み実行");
+    load_btn.set_label_size(14);
+    load_btn.set_label_color(Color::Black);
+    load_btn.set_label_font(Font::HelveticaBold);
+
     let mut copy_btn = Button::default().with_label("コピー");
+    copy_btn.set_label_size(14);
+    copy_btn.set_label_color(Color::Black);
+    copy_btn.set_label_font(Font::HelveticaBold);
+
     let mut export_btn = Button::default().with_label("テキスト出力");
+    export_btn.set_label_size(14);
+    export_btn.set_label_color(Color::Black);
+    export_btn.set_label_font(Font::HelveticaBold);
+
+    // チェックボックス：ツリー表示
+    let tree_check_state = Rc::new(RefCell::new(false));
+    let mut tree_check = CheckButton::default().with_label("ツリー表示");
+    // 初期値をオンにする
+    tree_check.set_value(true);
+    *tree_check_state.borrow_mut() = true;
+    {
+        let state = tree_check_state.clone();
+        tree_check.set_callback(move |cb| {
+            *state.borrow_mut() = cb.value();
+        });
+    }
 
     let mut copy_size_label = Frame::default().with_label("Copy Size: 0");
 
     btn_flex.end();
     main_flex.fixed(&btn_flex, 40);
 
-    // 中段Flex：選択ファイル内容表示とJSON表示を上下に並べる
+    // -------------------------
+    // 下段：テキストエリア（上がファイル内容、下がJSON表示）
+    // -------------------------
     let mid_flex = Flex::default().column();
 
     let chosen_file_buffer = Rc::new(RefCell::new(TextBuffer::default()));
@@ -98,53 +173,58 @@ fn main() {
 
     mid_flex.end();
     main_flex.add(&mid_flex);
+
     main_flex.end();
 
     win.resizable(&main_flex);
     win.end();
     win.show();
 
-    // 選択されたプロジェクトディレクトリ
+    // --------------------------------
+    // 選択されたプロジェクトディレクトリや設定
+    // --------------------------------
     let selected_project_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    // メモリ上で保持する output_path (設定ファイルに書かれたもの)
     let current_output_path: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
-    // --- ボタンのコールバック設定 ---
+    // --------------------------------
+    // コールバック設定
+    // --------------------------------
     {
         let s = s.clone();
         project_btn.set_callback(move |_| {
             s.send(Message::SelectProject);
         });
     }
-
     {
         let s = s.clone();
         add_file_btn.set_callback(move |_| {
             s.send(Message::AddFile);
         });
     }
-
+    {
+        let s = s.clone();
+        exclude_folder_btn.set_callback(move |_| {
+            s.send(Message::ExcludeFolder);
+        });
+    }
     {
         let s = s.clone();
         save_btn.set_callback(move |_| {
             s.send(Message::SaveSettings);
         });
     }
-
     {
         let s = s.clone();
         load_btn.set_callback(move |_| {
             s.send(Message::StartLoad);
         });
     }
-
     {
         let s = s.clone();
         copy_btn.set_callback(move |_| {
             s.send(Message::Copy);
         });
     }
-
     {
         let s = s.clone();
         export_btn.set_callback(move |_| {
@@ -152,109 +232,167 @@ fn main() {
         });
     }
 
-    // 受信ループ
-    // 非同期処理の結果やエラーを受け取り、GUIを更新
+    // --------------------------------
+    // イベントループ
+    // --------------------------------
     while app.wait() {
         if let Some(msg) = r.recv() {
             match msg {
-                // ===============================
+                // --------------------------
                 // プロジェクトフォルダ選択
-                // ===============================
+                // --------------------------
                 Message::SelectProject => {
                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                         let folder_path = folder.to_string_lossy().to_string();
                         *selected_project_dir.borrow_mut() = Some(folder_path.clone());
-                        
+
                         let settings_path = Path::new(&folder_path).join("text-read-settings.txt");
                         if !settings_path.exists() {
-                            let default_content = r#"# 表示対象ファイルパターンを正規表現で記述してください
+                            // ここで .git, target を初期除外設定に含める
+                            let default_content = r#"# 表示対象ファイルパターン（include）はそのまま記述
+# 除外したい場合は行頭に「EXCLUDE:」を付けて記述
 # 例：^main\.rs$
 # 例：^Cargo\.toml$
 
 # OUTPUT_PATH=ここには自動で保存先フォルダが書き込まれます
+
+# 以下は初期除外パターン
+EXCLUDE:^\.git/.*$
+EXCLUDE:^target/.*$
 "#;
-                            if let Ok(mut file) = File::create(&settings_path) {
-                                let _ = file.write_all(default_content.as_bytes());
+                            if let Ok(mut f) = File::create(&settings_path) {
+                                let _ = f.write_all(default_content.as_bytes());
                             }
                         }
-                        
-                        // 設定ファイルを読み込む
+
                         let loaded = load_settings(&folder_path);
-                        // patterns をGUIに反映
-                        pattern_input.borrow_mut().set_value(&loaded.patterns.join("\n"));
-                        // output_path をメモリに保持
+                        // includeパターンをGUIに反映
+                        include_input.borrow_mut().set_value(&loaded.patterns_include.join("\n"));
+                        // excludeパターンをGUIに反映
+                        exclude_input.borrow_mut().set_value(&loaded.patterns_exclude.join("\n"));
+
                         *current_output_path.borrow_mut() = loaded.output_path;
                     }
                 }
 
-                // ===============================
-                // ファイル追加（パターン生成）
-                // ===============================
+                // --------------------------
+                // ファイル追加（Include）
+                // --------------------------
                 Message::AddFile => {
-                    if let Some(files) = rfd::FileDialog::new().set_directory(".").pick_files() {
-                        let mut input = pattern_input.borrow_mut();
+                    if let Some(paths) = rfd::FileDialog::new().set_directory(".").pick_files() {
+                        let mut input = include_input.borrow_mut();
                         let mut current_text = input.value();
                         if !current_text.is_empty() && !current_text.ends_with('\n') {
                             current_text.push('\n');
                         }
-        
-                        for file in files {
-                            if let Some(file_name) = file.file_name() {
-                                let fname = file_name.to_string_lossy().to_string();
-                                let escaped = regex::escape(&fname);
-                                let pattern = format!("^{}$", escaped);
-                                current_text.push_str(&pattern);
-                                current_text.push('\n');
+
+                        for path in paths {
+                            if path.is_file() {
+                                if let Some(file_name) = path.file_name() {
+                                    let fname = file_name.to_string_lossy().to_string();
+                                    let escaped = regex::escape(&fname);
+                                    let pattern = format!("^{}$", escaped);
+                                    current_text.push_str(&pattern);
+                                    current_text.push('\n');
+                                }
+                            } else if path.is_dir() {
+                                if let Some(dir_name) = path.file_name() {
+                                    let dname = dir_name.to_string_lossy().to_string();
+                                    let escaped = regex::escape(&dname);
+                                    let pattern = format!("^{}/.*$", escaped);
+                                    current_text.push_str(&pattern);
+                                    current_text.push('\n');
+                                }
                             }
                         }
-        
                         input.set_value(&current_text);
                     }
                 }
 
-                // ===============================
+                // --------------------------
+                // フォルダ除外
+                // --------------------------
+                Message::ExcludeFolder => {
+                    if let Some(folder_path) = rfd::FileDialog::new().set_directory(".").pick_folder() {
+                        let mut input = exclude_input.borrow_mut();
+                        let mut current_text = input.value();
+                        if !current_text.is_empty() && !current_text.ends_with('\n') {
+                            current_text.push('\n');
+                        }
+                        // 例：^MyFolder/.*$
+                        if let Some(dir_name) = folder_path.file_name() {
+                            let dname = dir_name.to_string_lossy().to_string();
+                            let escaped = regex::escape(&dname);
+                            let pattern = format!("^{}/.*$", escaped);
+                            current_text.push_str(&pattern);
+                            current_text.push('\n');
+                        }
+                        input.set_value(&current_text);
+                    }
+                }
+
+                // --------------------------
                 // 設定保存
-                // ===============================
+                // --------------------------
                 Message::SaveSettings => {
                     if let Some(dir) = &*selected_project_dir.borrow() {
-                        let patterns_text = pattern_input.borrow().value();
-                        let patterns: Vec<&str> = patterns_text.lines()
+                        let inc_text = include_input.borrow().value();
+                        let exc_text = exclude_input.borrow().value();
+
+                        let inc_patterns: Vec<&str> = inc_text
+                            .lines()
                             .map(|s| s.trim())
-                            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                            .filter(|s| !s.is_empty())
                             .collect();
 
-                        // メモリ上にある output_path を取得
-                        let output_dir_opt = current_output_path.borrow().clone();
+                        let exc_patterns: Vec<&str> = exc_text
+                            .lines()
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .collect();
 
-                        if let Err(e) = write_settings(dir, &patterns, &output_dir_opt) {
+                        let output_dir_opt = current_output_path.borrow().clone();
+                        if let Err(e) = write_settings(dir, &inc_patterns, &exc_patterns, &output_dir_opt) {
                             alert_default(&format!("設定保存に失敗しました: {}", e));
                         }
                     }
                 }
 
-                // ===============================
-                // 読み込み開始（非同期）
-                // ===============================
+                // --------------------------
+                // 読み込み実行
+                // --------------------------
                 Message::StartLoad => {
                     let dir_opt = selected_project_dir.borrow().clone();
-                    let patterns_text = pattern_input.borrow().value();
+                    let inc_text = include_input.borrow().value();
+                    let exc_text = exclude_input.borrow().value();
                     let sender = s.clone();
+                    let include_tree = *tree_check_state.borrow();
 
                     std::thread::spawn(move || {
                         if let Some(dir) = dir_opt {
-                            let patterns: Vec<&str> = patterns_text.lines()
+                            let inc_patterns: Vec<regex::Regex> = inc_text
+                                .lines()
                                 .map(|s| s.trim())
-                                .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                                .filter(|s| !s.is_empty())
+                                .filter_map(|p| regex::Regex::new(p).ok())
                                 .collect();
 
-                            let regex_patterns: Vec<Regex> = patterns
-                                .iter()
-                                .filter_map(|p| Regex::new(p).ok())
+                            let exc_patterns: Vec<regex::Regex> = exc_text
+                                .lines()
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty())
+                                .filter_map(|p| regex::Regex::new(p).ok())
                                 .collect();
 
-                            match collect_target_files(&dir, &regex_patterns) {
+                            match collect_target_files(&dir, &inc_patterns, &exc_patterns) {
                                 Ok(files) => {
-                                    let output = ProjectOutput { files };
+                                    // ツリー表示
+                                    let tree_view = if include_tree {
+                                        Some(build_tree_view(&dir))
+                                    } else {
+                                        None
+                                    };
+                                    let output = ProjectOutput { files, tree_view };
                                     sender.send(Message::LoadFinished(Ok(output)));
                                 }
                                 Err(e) => {
@@ -265,12 +403,13 @@ fn main() {
                     });
                 }
 
-                // ===============================
+                // --------------------------
                 // 読み込み結果
-                // ===============================
+                // --------------------------
                 Message::LoadFinished(result) => {
                     match result {
                         Ok(output) => {
+                            // JSON表示
                             let json_str = match serde_json::to_string_pretty(&output) {
                                 Ok(js) => js,
                                 Err(e) => {
@@ -288,6 +427,11 @@ fn main() {
                                 all_files_text.push_str(&file_info.file_content);
                                 all_files_text.push_str("\n--------------------------------\n");
                             }
+                            if let Some(tree) = &output.tree_view {
+                                all_files_text.push_str("\n[Directory Tree]\n");
+                                all_files_text.push_str(tree);
+                                all_files_text.push_str("\n--------------------------------\n");
+                            }
                             chosen_file_buffer.borrow_mut().set_text(&all_files_text);
 
                             let size = json_str.len();
@@ -299,20 +443,18 @@ fn main() {
                     }
                 }
 
-                // ===============================
+                // --------------------------
                 // コピー
-                // ===============================
+                // --------------------------
                 Message::Copy => {
                     let val = json_buffer.borrow().text();
                     app::copy(&val);
-
-                    // コピーしたテキスト長を通知
                     s.send(Message::UpdateCopySize(val.len()));
                 }
 
-                // ===============================
-                // テキスト出力 (ファイル保存ダイアログ)
-                // ===============================
+                // --------------------------
+                // テキスト出力
+                // --------------------------
                 Message::ExportTxt => {
                     let val = json_buffer.borrow().text();
                     if val.is_empty() {
@@ -320,15 +462,9 @@ fn main() {
                         continue;
                     }
 
-                    // 現在の output_path を取得
                     let current_dir_opt = current_output_path.borrow().clone();
-                    // プロジェクトフォルダ
                     let dir_opt = selected_project_dir.borrow().clone();
 
-                    // ダイアログで表示するディレクトリを決める
-                    // 1) OUTPUT_PATH があればそれを使う
-                    // 2) なければプロジェクトフォルダ
-                    // 3) なければカレントディレクトリ
                     let dialog_dir = if let Some(op) = current_dir_opt.clone() {
                         op
                     } else if let Some(proj) = dir_opt.clone() {
@@ -337,7 +473,6 @@ fn main() {
                         ".".to_string()
                     };
 
-                    // デフォルトファイル名: <プロジェクトフォルダ名>_YYYYMMDD_HHMMSS.txt
                     let now = Local::now();
                     let time_str = now.format("%Y%m%d_%H%M%S").to_string();
                     let default_file_name = if let Some(proj_dir) = &dir_opt {
@@ -357,7 +492,6 @@ fn main() {
                         .save_file();
 
                     if let Some(chosen_path) = save_path {
-                        // ファイル書き込み
                         if let Some(parent) = chosen_path.parent() {
                             if let Err(e) = std::fs::create_dir_all(parent) {
                                 alert_default(&format!("フォルダ作成失敗: {}", e));
@@ -377,33 +511,39 @@ fn main() {
                             }
                         }
 
-                        // ダイアログで選んだフォルダを OUTPUT_PATH として保存
-                        // "C:/Users/.../filename.txt" -> "C:/Users/..." を OUTPUT_PATH に
+                        // 保存先を output_path に反映
                         if let Some(parent_dir) = chosen_path.parent() {
                             let new_path_str = parent_dir.to_string_lossy().to_string();
                             *current_output_path.borrow_mut() = Some(new_path_str.clone());
                         }
 
-                        // さらに、設定ファイルにも書き戻す
-                        // 1) patterns の取得
-                        let patterns_text = pattern_input.borrow().value();
-                        let patterns: Vec<&str> = patterns_text.lines()
+                        // 設定ファイルにも書き戻し
+                        let inc_text = include_input.borrow().value();
+                        let exc_text = exclude_input.borrow().value();
+
+                        let inc_patterns: Vec<&str> = inc_text
+                            .lines()
                             .map(|s| s.trim())
-                            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                            .filter(|s| !s.is_empty())
                             .collect();
 
-                        // 2) 書き込み
+                        let exc_patterns: Vec<&str> = exc_text
+                            .lines()
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+
                         if let Some(proj_dir) = &*selected_project_dir.borrow() {
-                            if let Err(e) = write_settings(proj_dir, &patterns, &current_output_path.borrow()) {
+                            if let Err(e) = write_settings(proj_dir, &inc_patterns, &exc_patterns, &current_output_path.borrow()) {
                                 alert_default(&format!("OUTPUT_PATHの設定保存に失敗: {}", e));
                             }
                         }
                     }
                 }
 
-                // ===============================
-                // コピーサイズの表示更新
-                // ===============================
+                // --------------------------
+                // コピーサイズ更新
+                // --------------------------
                 Message::UpdateCopySize(size) => {
                     copy_size_label.set_label(&format!("Copy Size: {}", size));
                 }
@@ -412,111 +552,9 @@ fn main() {
     }
 }
 
-// --------------------------------------
-// 設定ファイルの読み込み
-// --------------------------------------
-fn load_settings(base_dir: &str) -> LoadedSettings {
-    let settings_path = Path::new(base_dir).join("text-read-settings.txt");
-    let mut patterns = Vec::new();
-    let mut output_path: Option<String> = None;
-
-    if settings_path.exists() {
-        if let Ok(file) = File::open(settings_path) {
-            for line in BufReader::new(file).lines() {
-                if let Ok(pat) = line {
-                    let trimmed = pat.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') {
-                        continue;
-                    }
-                    // OUTPUT_PATH= で始まる行をチェック
-                    if let Some(rest) = trimmed.strip_prefix("OUTPUT_PATH=") {
-                        let val = rest.trim();
-                        if !val.is_empty() {
-                            output_path = Some(val.to_string());
-                        }
-                    } else {
-                        patterns.push(trimmed.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    LoadedSettings {
-        patterns,
-        output_path,
-    }
-}
-
-// --------------------------------------
-// 設定ファイルの書き込み
-// --------------------------------------
-fn write_settings(
-    project_dir: &str,
-    patterns: &[&str],
-    output_path: &Option<String>,
-) -> Result<(), String> {
-    let settings_path = Path::new(project_dir).join("text-read-settings.txt");
-
-    let mut file = File::create(&settings_path)
-        .map_err(|e| format!("設定ファイル作成に失敗: {}", e))?;
-
-    // 1) OUTPUT_PATH
-    if let Some(op) = output_path {
-        // OUTPUT_PATH=... を書き込み
-        let line = format!("OUTPUT_PATH={}\n\n", op);
-        file.write_all(line.as_bytes())
-            .map_err(|e| format!("OUTPUT_PATH書き込み失敗: {}", e))?;
-    }
-
-    // 2) パターンの書き込み
-    for pat in patterns {
-        if let Err(e) = writeln!(file, "{}", pat) {
-            return Err(format!("パターン書き込みに失敗: {}", e));
-        }
-    }
-
-    Ok(())
-}
-
-// --------------------------------------
-// ファイルを集める関数（非同期で呼び出される想定）
-// --------------------------------------
-fn collect_target_files(base_dir: &str, targets: &[Regex]) -> Result<Vec<FileInfo>, String> {
-    let mut results = Vec::new();
-    let base_path = Path::new(base_dir);
-
-    for entry in WalkDir::new(base_path) {
-        let e = entry.map_err(|e| e.to_string())?;
-        if e.file_type().is_file() {
-            let path = e.path();
-            let filename = path.file_name().unwrap().to_string_lossy().to_string();
-            if is_in_target_patterns(&filename, targets) {
-                let content = fs::read_to_string(path)
-                    .map_err(|e| format!("ファイル読み込みに失敗: {} ({})", e, filename))?;
-                let file_url = path.to_string_lossy().to_string();
-                results.push(FileInfo {
-                    file_url,
-                    file_name: filename,
-                    file_content: content,
-                });
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-// --------------------------------------
-// 正規表現パターンに合致するか確認する関数
-// --------------------------------------
-fn is_in_target_patterns(filename: &str, patterns: &[Regex]) -> bool {
-    patterns.iter().any(|re| re.is_match(filename))
-}
-
-// --------------------------------------
-// 簡易エラーアラート
-// --------------------------------------
+// --------------------------------------------------
+// アラート
+// --------------------------------------------------
 fn alert_default(msg: &str) {
     alert(0, 0, msg);
 }
