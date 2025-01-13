@@ -2,7 +2,6 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>gpt-text-read README</title>
 </head>
 <body>
 
