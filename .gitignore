@@ -1,0 +1,5 @@
+/target
+.git
+target
+Cargo.lock
+text-read-settings.txt

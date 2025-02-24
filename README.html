@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+</head>
+<body>
+
+<h2>プロジェクト概要</h2>
+<p>このプロジェクト「gpt-text-read」は、フォルダ内のテキストファイルを収集し、  
+その内容をJSON形式で表示・コピー・テキスト出力できるGUIツールです。  
+ユーザーは正規表現パターンを使って対象ファイル(Include)や除外ファイル(Exclude)を柔軟に指定できます。  
+また、GUI上でフォルダを選択・ファイルを追加・フォルダ除外などを行うことで、  
+簡単にパターンの編集を行うことができます。</p>
+
+<h2>主な機能</h2>
+<ul>
+  <li>
+    <strong>プロジェクトディレクトリの選択：</strong><br>
+    「<em>プロジェクト選択</em>」ボタンを押してフォルダを選ぶと、
+    指定フォルダ内に<code>text-read-settings.txt</code>がない場合は初期設定ファイルを自動生成します。
+    存在する場合は、その内容（ファイルマッチパターンや出力先パスなど）を読み込みます。  
+    フォルダ選択後、自動的にテキストファイルの読み込み（再帰探索）が実行されます。
+  </li>
+  <li>
+    <strong>ファイル追加ボタン：</strong><br>
+    「<em>ファイル追加</em>」ボタンで実際のファイルやフォルダを選択すると、
+    選択したパスを基に正規表現パターン（例：<code>^ファイル名$</code>や<code>^フォルダ名.*$</code>など）が
+    <code>text-read-settings.txt</code>のIncludeパターンへ自動で追記されます。
+  </li>
+  <li>
+    <strong>ツリーフォルダ除外ボタン：</strong><br>
+    「<em>ツリーフォルダ除外</em>」ボタンを押してフォルダを選択すると、
+    そのフォルダ名に対する除外パターン（例：<code>^FolderName/.*$</code>）が
+    <code>text-read-settings.txt</code>のExcludeパターンへ追記されます。
+    （コード上では、<code>EXCLUDE:</code>プレフィックス付きで設定ファイルに書き込まれます。）
+  </li>
+  <li>
+    <strong>ツリー表示チェック：</strong><br>
+    「<em>ツリー表示</em>」チェックボックスを有効にすると、
+    フォルダの階層構造をテキストツリーとして取得・表示できます。  
+    内部的に<code>target/backup</code>ディレクトリは強制的に除外される仕様です。
+  </li>
+  <li>
+    <strong>保存更新ボタン：</strong><br>
+    「<em>保存更新</em>」ボタンにより、現在GUIで編集したパターン（Include/Excludeなど）を
+    <code>text-read-settings.txt</code>へ書き戻した後、自動的にテキストファイルの再読み込みが行われます。
+    また、テキスト出力した際に指定した出力先フォルダも<code>OUTPUT_PATH</code>として保存され、
+    次回以降の出力先の初期値として利用されます。
+  </li>
+  <li>
+    <strong>コピー機能：</strong><br>
+    「<em>コピー</em>」ボタンで、表示中のJSONテキストをクリップボードへコピーできます。
+  </li>
+  <li>
+    <strong>テキスト出力：</strong><br>
+    「<em>テキスト出力</em>」ボタンで、表示中のJSONテキストを任意のパスに出力できます。
+    出力先フォルダが<code>text-read-settings.txt</code>の<code>OUTPUT_PATH</code>に自動保存され、
+    次回以降の保存先の初期値として利用されます。
+  </li>
+  <li>
+    <strong>スナップショット作成：</strong><br>
+    「<em>スナップショット作成</em>」ボタンを押すと、現在の読み込み結果に含まれるファイルのみを
+    <code>target/backup/日付時刻-snapshot</code> というフォルダへコピーできます。
+    たとえば、<code>target/backup/2025-02-22_153045-snapshot/</code>のように、
+    実行時刻を含むフォルダが自動生成され、上書きされることなくスナップショットを取得できます。
+  </li>
+</ul>
+
+<h2>利用手順</h2>
+<ol>
+  <li>
+    <strong>プロジェクトフォルダを選択する：</strong><br>
+    「<em>プロジェクト選択</em>」ボタンを押し、対象とするフォルダをダイアログから選びます。<br>
+    初回は<code>text-read-settings.txt</code>が自動作成され、初期コメントや項目が含まれます。<br>
+    フォルダを選んだ後、自動でテキストファイル読み込みが実行されます。
+  </li>
+  <li>
+    <strong>ファイル追加・フォルダ除外・パターン編集を行う：</strong><br>
+    「<em>ファイル追加</em>」や「<em>ツリーフォルダ除外</em>」ボタンで実際のファイル・フォルダを追加/除外すると、
+    そのパターンがGUIの<code>Include</code>欄または<code>Exclude</code>欄に自動的に追記されます。<br>
+    また、GUI上でパターンを直接編集することもできます。
+  </li>
+  <li>
+    <strong>パターンを保存して再読み込み：</strong><br>
+    「<em>保存更新</em>」ボタンで現在のパターンを<code>text-read-settings.txt</code>へ保存し、
+    直後にファイル再読み込みが自動的に行われます。<br>
+    ツリー表示のチェックがONの場合は、ディレクトリ構造も表示されます。
+  </li>
+  <li>
+    <strong>コピーまたはテキスト出力：</strong><br>
+    JSONをコピーしたい場合は「<em>コピー</em>」ボタンを押します。  
+    テキストファイルとして出力したい場合は「<em>テキスト出力</em>」ボタンを押し、
+    出力先フォルダを指定します。<br>
+    出力先フォルダは設定ファイル<code>OUTPUT_PATH</code>に自動保存され、次回以降の初期値として利用されます。
+  </li>
+  <li>
+    <strong>スナップショット作成：</strong><br>
+    「<em>スナップショット作成</em>」ボタンを押すと、
+    現在読み込まれているファイルだけが<code>target/backup/【タイムスタンプ】-snapshot</code>へコピーされます。
+    これにより、同日中に複数回バックアップを行っても上書きされず、各時点のファイルを取得できます。
+  </li>
+</ol>
+
+<h2>依存関係・ビルド</h2>
+<p>
+このプロジェクトはRustで開発されており、<code>Cargo.toml</code>の例は以下の通りです：
+</p>
+<pre>
+[package]
+name = "gpt-text-read"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+walkdir = "2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.8"
+fltk = { version = "1", features = ["fltk-bundled"] }
+chrono = "0.4"
+</pre>
+<p>
+<code>cargo build</code>や<code>cargo run</code>でビルド・実行できます。
+</p>
+
+<h2>コード構成</h2>
+<p>
+<code>main.rs</code>  
+：GUIの初期化、ボタンコールバック、ファイルパターンの読み込み・保存、  
+ファイル収集処理、スナップショット機能呼び出しなどが記述されています。  
+</p>
+<p>
+<code>fileops.rs</code>  
+：指定フォルダを再帰的に探索してマッチするファイルを集める機能や、  
+ディレクトリツリーを構築する機能が定義されています。  
+</p>
+<p>
+<code>settings.rs</code>  
+：<code>text-read-settings.txt</code>の読み書きロジックがあり、  
+Includeパターン・Excludeパターン・出力先パス(<code>OUTPUT_PATH</code>)を管理します。  
+</p>
+<p>
+<code>backup.rs</code>  
+：読み込まれたファイルを指定パス(<code>target/backup/日付時刻-snapshot</code>)へコピーする
+スナップショット作成機能が定義されています。
+</p>
+
+<p>
+<code>models.rs</code>  
+：ファイル情報を保持する構造体<code>FileInfo</code>や、
+読み込み結果の<code>ProjectOutput</code>などが定義されています。
+</p>
+
+<h2>ライセンス</h2>
+<p>
+本プロジェクトは、特に明記がない場合、MITまたはApache-2.0ライセンスで配布可能です。  
+詳細はライセンスファイルを参照してください。
+</p>
+
+</body>
+</html>
